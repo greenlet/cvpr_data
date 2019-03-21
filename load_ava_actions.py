@@ -8,14 +8,15 @@ import re
 import utils
 
 
-VIDEO_ID_REGEX = re.compile(r'^v_(.+)\.mp4$')
+CUSTOM_VIDEO_ID_REGEX = re.compile(r'^v_(.+)\.(\w+)$')
+CVDF_VIDEO_ID_REGEX = re.compile(r'<Key>(trainval|test)/([a-zA-Z0-9\-_]+)\.(\w+)</Key>')
 
 
 def get_ids(path):
   file_names = os.listdir(path)
   ids = set()
   for fname in file_names:
-    m = VIDEO_ID_REGEX.match(fname)
+    m = CUSTOM_VIDEO_ID_REGEX.match(fname)
     if m:
       ids.add(m.group(1))
   return ids
@@ -66,6 +67,23 @@ def load_lists(opt):
   return train_video_ids, val_video_ids, test_video_ids, timestamps
 
 
+def load_cvdf_list(opt):
+  base_url = 'https://s3.amazonaws.com/ava-dataset'
+  print('Loading files list from {}'.format(base_url))
+  xml_path = os.path.join(opt.out_path, 'cvdf.xml')
+  res = {}
+  with urllib.request.urlopen(base_url) as response, open(xml_path, 'w+') as fout:
+    xml_str = response.read().decode('utf-8')
+    matches = CVDF_VIDEO_ID_REGEX.findall(xml_str)
+    for m in matches:
+      res[m[1]] = {
+        'url': '{}/{}/{}.{}'.format(base_url, m[0], m[1], m[2]),
+        'ext': m[2]
+      }
+    fout.write(xml_str)
+  return res
+
+
 def rewrite_timestamps_file(opt, name_base, delta):
   def decrement(ts_str):
     ts = int(ts_str)
@@ -100,7 +118,7 @@ def rewrite_timestamps(opt, delta):
   rewrite_timestamps_file(opt, '{}test_excluded_timestamps{}.csv', delta)
 
 
-def load_files(opt, ids_to_load, data_type, timestamps):
+def load_files(opt, ids_to_load, data_type, timestamps, cvdf_id2info, log_file):
   out_dir = src_dir = os.path.join(opt.out_path, 'src_{}'.format(data_type))
   utils.make_dir(src_dir)
   if opt.shorten:
@@ -112,17 +130,32 @@ def load_files(opt, ids_to_load, data_type, timestamps):
   # Removing 'v_' prefix and '.mp4' suffix
   ids_to_load -= get_ids(out_dir)
   print('Start loading {} files into {}'.format(len(ids_to_load), out_dir))
+
+  def process(cmd):
+    if opt.shorten:
+      print(cmd)
+      log_file.write(cmd + '\n')
+      log_file.flush()
+      res = subprocess.run(cmd, stderr=log_file, shell=True)
+      print('--> ' + ('FAIL' if res.returncode else 'SUCCESS'))
+      return res
+
   for video_id in sorted(ids_to_load):
     video_file_name = 'v_{}.mp4'.format(video_id)
     src_file_path = os.path.join(src_dir, video_file_name)
     cmd = 'youtube-dl -f best -f mp4 "https://youtube.com/watch?v={}" -o "{}"'.format(
       video_id, src_file_path)
-    if opt.shorten:
+    process(cmd)
+    if not os.path.exists(src_file_path) and video_id in cvdf_id2info:
+      video_file_name = 'v_{}.{}'.format(video_id, cvdf_id2info[video_id]['ext'])
+      src_file_path = os.path.join(src_dir, video_file_name)
+      cmd = 'youtube-dl "{}" -o "{}"'.format(cvdf_id2info[video_id]['url'], src_file_path)
+      process(cmd)
+    if opt.shorten and os.path.exists(src_file_path):
       short_file_path = os.path.join(short_dir, video_file_name)
-      cmd += ' && ' + cmd_shorten.format(src_file_path, short_file_path)
-    print(cmd)
-    subprocess.run(cmd, shell=True)
-  
+      cmd = cmd_shorten.format(src_file_path, short_file_path)
+      process(cmd)
+
   ids_left = ids_to_load - get_ids(out_dir)
   return ids_left
 
@@ -131,29 +164,28 @@ def run(opt):
   opt.out_path = os.path.join(opt.data_path, 'AVA_Actions_v{}'.format(opt.version))
   opt.out_path = utils.make_dir(opt.out_path)
   train_video_ids, val_video_ids, test_video_ids, timestamps = load_lists(opt)
+  cvdf_id2info = load_cvdf_list(opt)
   if opt.shorten:
     rewrite_timestamps(opt, timestamps[0])
-  not_loaded_path = os.path.join(opt.out_path, 'not_loaded.txt')
-  if os.path.exists(not_loaded_path):
-    os.remove(not_loaded_path)
+  log_file = open(os.path.join(opt.out_path, 'load.log'), 'w+')
   ids_left = set()
   if train_video_ids:
-    not_loaded = load_files(opt, train_video_ids, 'train', timestamps)
+    not_loaded = load_files(opt, train_video_ids, 'train', timestamps, cvdf_id2info, log_file)
     ids_left = ids_left.union(not_loaded)
   if val_video_ids:
-    not_loaded = load_files(opt, val_video_ids, 'val', timestamps)
+    not_loaded = load_files(opt, val_video_ids, 'val', timestamps, cvdf_id2info, log_file)
     ids_left = ids_left.union(not_loaded)
   if test_video_ids:
-    not_loaded = load_files(opt, test_video_ids, 'test', timestamps)
+    not_loaded = load_files(opt, test_video_ids, 'test', timestamps, cvdf_id2info, log_file)
     ids_left = ids_left.union(not_loaded)
 
   not_loaded_path = os.path.join(opt.out_path, 'not_loaded.txt')
-  n = len(ids_left)
-  if n == 0 and os.path.exists(not_loaded_path):
+  n_left = len(ids_left)
+  if n_left == 0 and os.path.exists(not_loaded_path):
     os.remove(not_loaded_path)
-  elif n > 0:
+  elif n_left > 0:
     print('There are {} files not loaded. Writing them down to {}'.format(n, not_loaded_path))
-    with open(not_loaded_path, 'a+') as f:
+    with open(not_loaded_path, 'w+') as f:
       f.write('\n'.join(sorted(ids_left)))
 
 
@@ -171,7 +203,6 @@ if __name__ == '__main__':
       New video files will be generated into subdirectories short_train, short_val, short_test respectively. \
       All CSV, TXT data containing timestamps will be adjusted accordingly and put into files with prefix "short_"')
   opt = parser.parse_args()
-  print(opt)
 
   run(opt)
 

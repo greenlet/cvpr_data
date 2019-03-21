@@ -1,11 +1,15 @@
 # Video datasets loader for ActiveNet challenge
 ## Description
-Convenience scripts for loading and transforming youtube video for datasets within ActiveNet challenge
+Convenience scripts for loading and transforming youtube video for datasets within ActiveNet challenge. Key moments:
+ - Dataset is downloaded from Youtube in `mp4` format
+ - If Youtube video is unavailable, AVA Amazon source used (https://s3.amazonaws.com/ava-dataset). These videos formats are not limited with `mp4` and could be `mkv`, `webm` as well
+ - When shortening is enabled (`--shorten` flag), `ffmpeg` is used. It does just cropping, no transcoding, so the process is quite fast (few seconds for each video). Also, due to relative timestamps change after shortening videos, all timestamp values in AVA dataset `txt` and `csv` files are changed and saved to the new ones with the `shorten_` prefix
+
 
 ## Prerequisites
 ### Packages needed:
  - [youtube-dl](https://github.com/ytdl-org/youtube-dl) 
- - [ffmpeg](https://ffmpeg.org/download.html) - only needed when flag `--shorten` is used (which is trimming source video to fit included timestamps)
+ - [ffmpeg](https://ffmpeg.org/download.html) - only needed when flag `--shorten` is used
 
 ## Datasets
 ### [AVA Actions](https://research.google.com/ava/download.html)
