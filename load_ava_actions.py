@@ -5,6 +5,7 @@ import shutil
 import zipfile
 import subprocess
 import re
+from datetime import datetime
 import utils
 
 
@@ -122,51 +123,78 @@ def load_files(opt, ids_to_load, data_type, timestamps, cvdf_id2info, log_file):
   out_dir = src_dir = os.path.join(opt.out_path, 'src_{}'.format(data_type))
   utils.make_dir(src_dir)
   if opt.shorten:
-    cmd_shorten = 'ffmpeg -loglevel warning -ss {} -i {{}} -t {} -c copy {{}}'.format(
-      timestamps[0] - 0.5, timestamps[1] - timestamps[0] + 1)
+    # Each timestamp is a middle of a 3-second short action
+    # located at [timestamp - 1.5, timestamp + 1.5] period
+    ts_start = timestamps[0] - 1.5
+    ts_stop = 1.5 + (timestamps[1] - timestamps[0]) + 1.5
+    shorten_cmd_fmt = 'ffmpeg -loglevel warning -ss {} -i {{}} -t {} -c copy {{}}'.format(
+      ts_start, ts_stop)
     out_dir = short_dir = os.path.join(opt.out_path, 'short_{}'.format(data_type))
     utils.make_dir(short_dir)
   file_names = os.listdir(out_dir)
   # Removing 'v_' prefix and '.mp4' suffix
   ids_to_load -= get_ids(out_dir)
+  if not len(ids_to_load):
+    print('Nothing to load into {}'.format(out_dir))
+    return ids_to_load
   print('Start loading {} files into {}'.format(len(ids_to_load), out_dir))
 
   def process(cmd):
-    if opt.shorten:
-      print(cmd)
-      log_file.write(cmd + '\n')
-      log_file.flush()
-      res = subprocess.run(cmd, stderr=log_file, shell=True)
-      print('--> ' + ('FAIL' if res.returncode else 'SUCCESS'))
-      return res
+    print(cmd)
+    log_file.write(cmd + '\n')
+    log_file.flush()
+    res = subprocess.run(cmd, stderr=log_file, shell=True)
+    print('--> ' + ('FAIL' if res.returncode else 'SUCCESS'))
+    return res
 
   for video_id in sorted(ids_to_load):
-    video_file_name = 'v_{}.mp4'.format(video_id)
-    src_file_path = os.path.join(src_dir, video_file_name)
-    cmd = 'youtube-dl -f best -f mp4 "https://youtube.com/watch?v={}" -o "{}"'.format(
-      video_id, src_file_path)
-    process(cmd)
-    if not os.path.exists(src_file_path) and video_id in cvdf_id2info:
-      video_file_name = 'v_{}.{}'.format(video_id, cvdf_id2info[video_id]['ext'])
-      src_file_path = os.path.join(src_dir, video_file_name)
-      cmd = 'youtube-dl "{}" -o "{}"'.format(cvdf_id2info[video_id]['url'], src_file_path)
-      process(cmd)
-    if opt.shorten and os.path.exists(src_file_path):
-      short_file_path = os.path.join(short_dir, video_file_name)
-      cmd = cmd_shorten.format(src_file_path, short_file_path)
-      process(cmd)
+    ytb_file_name = 'v_{}.mp4'.format(video_id)
+    ytb_file_path = os.path.join(src_dir, ytb_file_name)
+    ytb_cmd = 'youtube-dl -f best -f mp4 "https://youtube.com/watch?v={}" -o "{}"'.format(
+      video_id, ytb_file_path)
+    
+    cvdf_file_path = None
+    if video_id in cvdf_id2info:
+      cvdf_file_name = 'v_{}.{}'.format(video_id, cvdf_id2info[video_id]['ext'])
+      cvdf_file_path = os.path.join(src_dir, cvdf_file_name)
+      cvdf_cmd = 'youtube-dl "{}" -o "{}"'.format(
+        cvdf_id2info[video_id]['url'], cvdf_file_path)
+
+    if not os.path.exists(ytb_file_path):
+      if cvdf_file_path:
+        if not os.path.exists(cvdf_file_path):
+          process(ytb_cmd)
+          if not os.path.exists(ytb_file_path):
+            process(cvdf_cmd)
+      else:
+        process(ytb_cmd)
+
+    src_file_path = None
+    src_file_name = None
+    if os.path.exists(ytb_file_path):
+      src_file_path, src_file_name = ytb_file_path, ytb_file_name
+    elif os.path.exists(cvdf_file_path):
+      src_file_path, src_file_name = cvdf_file_path, cvdf_file_name
+
+    if opt.shorten and src_file_path:
+      short_file_path = os.path.join(short_dir, src_file_name)
+      if not os.path.exists(short_file_path):
+        shorten_cmd = shorten_cmd_fmt.format(src_file_path, short_file_path)
+        process(shorten_cmd)
 
   ids_left = ids_to_load - get_ids(out_dir)
   return ids_left
 
 
 def run(opt):
+  t1 = datetime.now()
+
   opt.out_path = os.path.join(opt.data_path, 'AVA_Actions_v{}'.format(opt.version))
   opt.out_path = utils.make_dir(opt.out_path)
   train_video_ids, val_video_ids, test_video_ids, timestamps = load_lists(opt)
   cvdf_id2info = load_cvdf_list(opt)
   if opt.shorten:
-    rewrite_timestamps(opt, timestamps[0])
+    rewrite_timestamps(opt, timestamps[0] + 1)
   log_file = open(os.path.join(opt.out_path, 'load.log'), 'w+')
   ids_left = set()
   if train_video_ids:
@@ -184,9 +212,14 @@ def run(opt):
   if n_left == 0 and os.path.exists(not_loaded_path):
     os.remove(not_loaded_path)
   elif n_left > 0:
-    print('There are {} files not loaded. Writing them down to {}'.format(n, not_loaded_path))
+    print('There are {} files not loaded. Writing them down to {}'.format(
+      n_left, not_loaded_path))
     with open(not_loaded_path, 'w+') as f:
       f.write('\n'.join(sorted(ids_left)))
+  
+  t2 = datetime.now()
+  delta = t2 - t1
+  print('\nProcessing time: {}'.format(delta))
 
 
 if __name__ == '__main__':
