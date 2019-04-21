@@ -1,8 +1,6 @@
 import os
 import argparse
 import urllib.request
-import shutil
-import zipfile
 import subprocess
 import re
 from datetime import datetime
@@ -40,13 +38,9 @@ def read_ids(file_path):
 def load_lists(opt):
   arch_name = 'ava_v{}.zip'.format(opt.version)
   arch_path = os.path.join(opt.out_path, arch_name)
-  if not os.path.exists(opt.out_path):
-    arch_url = 'https://research.google.com/ava/download/{}'.format(arch_name)
-    print('Downloading {} into {}'.format(arch_url, opt.out_path))
-    with urllib.request.urlopen(arch_url) as response, open(arch_path, 'wb') as out_file:
-        shutil.copyfileobj(response, out_file)
-    with zipfile.ZipFile(arch_path) as zip_ref:
-      zip_ref.extractall(opt.out_path)
+  arch_url = 'https://research.google.com/ava/download/{}'.format(arch_name)
+  if utils.download_file(arch_url, arch_path):
+    utils.extract(arch_path, opt.out_path)
 
   train_video_ids, val_video_ids, test_video_ids = None, None, None
   if opt.type is None or opt.type == 'train':
@@ -194,7 +188,7 @@ def run(opt):
   train_video_ids, val_video_ids, test_video_ids, timestamps = load_lists(opt)
   cvdf_id2info = load_cvdf_list(opt)
   if opt.shorten:
-    rewrite_timestamps(opt, timestamps[0] + 1)
+    rewrite_timestamps(opt, timestamps[0] - 1)
   log_file = open(os.path.join(opt.out_path, 'load.log'), 'w+')
   ids_left = set()
   if train_video_ids:
@@ -217,9 +211,7 @@ def run(opt):
     with open(not_loaded_path, 'w+') as f:
       f.write('\n'.join(sorted(ids_left)))
   
-  t2 = datetime.now()
-  delta = t2 - t1
-  print('\nProcessing time: {}'.format(delta))
+  print('\nProcessing time: {}'.format(datetime.now() - t1))
 
 
 if __name__ == '__main__':
