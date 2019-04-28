@@ -1,4 +1,5 @@
 import argparse
+import cv2
 from datetime import datetime
 import json
 from multiprocessing import Process, Queue, current_process
@@ -14,9 +15,10 @@ import sys
 import traceback
 import time
 import urllib
-import utils
 import youtube_dl
 from youtube_dl import DownloadError
+
+import utils
 
 
 KIN_VERSION = 600
@@ -190,7 +192,7 @@ def exec_ydl_cmd(ydl, cmd, url):
     raise ExecError(STATUS_EXEC_ERROR, cmd, str(err)) 
 
 
-def exec_shell_cmd(cmd, timeout=40, attempts=2):
+def exec_shell_cmd(cmd, timeout=40, attempts=1, noexcept=False):
   if type(cmd) != str:
     cmd = ' '.join(cmd)
   args = {}
@@ -202,14 +204,24 @@ def exec_shell_cmd(cmd, timeout=40, attempts=2):
       pprint(cmd)
       res = sbpr.run(cmd, stdout=sbpr.PIPE, stderr=sbpr.PIPE, encoding='utf-8', **args)
       if res.returncode == 0:
-        return (res.stdout or '').strip()
+        output = (res.stdout or '').strip()
+        if noexcept:
+          return STATUS_EXEC_SUCCESS, cmd, output
+        return output
+      # Error occured
       output = ''
       if res.stderr:
         output = res.stderr.strip()
+      else:
+        output = 'Exited with code: {}'.format(res.returncode)
+      if noexcept:
+        return STATUS_EXEC_ERROR, cmd, output
       raise ExecError(STATUS_EXEC_ERROR, cmd, output)
     except sbpr.TimeoutExpired as err:
-      pprint('Timeout reached {}'.format(timeout))
+      pprint('Attempt #{}. Timeout reached {}'.format(i, timeout))
       output += err.output
+  if noexcept:
+    return STATUS_EXEC_TIMEOUT, cmd, output
   raise ExecError(STATUS_EXEC_TIMEOUT, cmd, output)
 
 
@@ -218,6 +230,22 @@ def get_ydl_url(ydl_info):
   if '18' in formats:
     return formats['18']['url']
   raise ExecError(STATUS_EXEC_ERROR, 'get_ydl_url', json.dumps(formats))
+
+
+def is_valid_video(file_path):
+  cap = cv2.VideoCapture(file_path)
+  width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+  height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+  frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+  return width > 0 and height > 0 and frames_num > 1
+
+
+def move_video(tmp_file_path, out_file_path):
+  if not os.path.exists(tmp_file_path):
+    raise ExecError(STATUS_EXEC_ERROR, 'copy_video', 'File "{}" not found'.format(tmp_file_path))
+  if not is_valid_video(tmp_file_path):
+    raise ExecError(STATUS_EXEC_ERROR, 'copy_video', 'File "{}" is not valid video'.format(tmp_file_path))
+  shutil.move(tmp_file_path, out_file_path)
 
 
 def exec_task(task):
@@ -229,6 +257,7 @@ def exec_task(task):
     'quiet': True,
     'no_warnings': True,
     'socket_timeout': 40,
+    'retries': 1,
   }
   ydl = youtube_dl.YoutubeDL(ydl_opts)
   
@@ -238,23 +267,39 @@ def exec_task(task):
   file_name = file_name_tmpl % {'id': youtube_id}
   tmp_file_path = os.path.join(tmp_path, file_name)
   out_file_path = os.path.join(fout_path, file_name)
-  if ydl_info['duration'] <= 10:
-    pprint('Duration: {}'.format(ydl_info['duration']))
-    res = exec_ydl_cmd(ydl, CMD_YDL_DOWNLOAD, url)
-  else:
-    ydl_url = get_ydl_url(ydl_info)
-    exec_shell_cmd([
+
+  def make_ffmpeg_cmd(src_path, dst_path):
+    return [
       'ffmpeg -y', # Overwrite
       '-ss {}'.format(time_start),
       '-t {}'.format(time_end - time_start),
-      '-i "{}"'.format(ydl_url),
+      '-i "{}"'.format(src_path),
       '-c:v libx264 -preset ultrafast',
       '-c:a aac',
       '-threads 1 -loglevel panic',
-      '"{}"'.format(tmp_file_path)
-    ])
+      '"{}"'.format(dst_path)
+    ]
 
-  shutil.move(tmp_file_path, out_file_path)
+  if ydl_info['duration'] <= 10:
+    pprint('Duration: {}'.format(ydl_info['duration']))
+    exec_ydl_cmd(ydl, CMD_YDL_DOWNLOAD, url)
+  else:
+    ydl_url = get_ydl_url(ydl_info)
+    ffmpeg_cmd = make_ffmpeg_cmd(ydl_url, tmp_file_path)
+    status, cmd, output = exec_shell_cmd(ffmpeg_cmd, noexcept=True)
+    # Sometimes FFMPEG fails downloading from valid URL
+    faulty = False
+    if status != STATUS_EXEC_SUCCESS or not is_valid_video(tmp_file_path):
+      if status != STATUS_EXEC_SUCCESS:
+        pprint('{}. {}\n\tOuput:{}'.format(status, cmd, output))
+      exec_ydl_cmd(ydl, CMD_YDL_DOWNLOAD, url)
+      tmp_long_file_path = os.path.join(tmp_path, 'long_{}'.format(file_name))
+      shutil.move(tmp_file_path, tmp_long_file_path)
+      ffmpeg_cmd = make_ffmpeg_cmd(tmp_long_file_path, tmp_file_path)
+      exec_shell_cmd(ffmpeg_cmd)
+      os.remove(tmp_long_file_path)
+
+  move_video(tmp_file_path, out_file_path)
 
 
 def download(queue_adm, queue_in, queue_out):
@@ -368,8 +413,9 @@ def get_dataset(out_path, split, num_jobs):
 
     def receive(n=None, strict=False):
       nonlocal n_received
-      n = n if n else N - n_received
-      for i in range(n):
+      n = n if n else n_sent - n_received
+      i = 0
+      while i < n:
         if process_exit:
           return
         res = check_queue(queue_out)
@@ -384,6 +430,7 @@ def get_dataset(out_path, split, num_jobs):
               is_blocked_or_unavailable(output)
             put_lines(youtube_id, log_line, is_err)
           n_received += 1
+          i += 1
         elif not strict and queue_in.qsize() <= num_jobs:
           return
 

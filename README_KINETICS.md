@@ -7,6 +7,7 @@ Script for loading Kinetics video from Youtube
  - [youtube-dl](https://github.com/ytdl-org/youtube-dl) 
  - [ffmpeg](https://ffmpeg.org/download.html)
  - [pandas](https://pandas.pydata.org/getpandas.html)
+ - [opencv-python](https://github.com/skvark/opencv-python)
 
 ## Datasets
 ### [Kinetics-600](https://deepmind.com/research/open-source/open-source-datasets/kinetics)
