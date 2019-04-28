@@ -65,7 +65,19 @@ def read_dataframe(out_path, split):
   csv_path = os.path.join(out_path, csv_name)
   if utils.download_file(arch_url, arch_path):
     utils.extract(arch_path, out_path, csv_name)
-  return pd.read_csv(csv_path)
+  df = pd.read_csv(csv_path)
+  if 'label' in df.columns:
+    df['label'] = df['label'].astype('category')
+  return df
+
+
+def save_labels(df, out_path):
+  if 'label' in df.columns:
+    file_path = os.path.join(out_path, 'labels.txt')
+    if not os.path.exists(file_path):
+      labels = sorted(df['label'].cat.categories.tolist())
+      f = open(file_path, 'w+')
+      f.write('\n'.join(labels))
 
 
 def make_directories(out_path, split, df):
@@ -342,6 +354,7 @@ def get_dataset(out_path, split, num_jobs):
   
   # Read CSV into Dataframe
   df = read_dataframe(out_path, split)
+  save_labels(df, out_path)
 
   # Make subdirectories
   tmp_path, split_path = make_directories(out_path, split, df)
